@@ -1,0 +1,115 @@
+name: Update SPC mesoanalysis indexes
+
+on:
+  schedule:
+    # Once per hour. The script probes newest->older and skips cleanly if the
+    # newest available FINAL is already published.
+    - cron: '25 * * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Optional explicit UTC date (YYYYMMDD). Leave blank for auto.'
+        required: false
+        type: string
+      hour:
+        description: 'Optional explicit UTC hour (0-23). Leave blank for auto.'
+        required: false
+        type: string
+      force:
+        description: 'Rebuild even if that hour is already latest'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: spc-mesoanalysis-pages-index
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install indexer dependencies
+        run: python -m pip install -r requirements-spc-index.txt
+
+      - name: Build newest SPC index
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--auto --lookback 8 --output-dir site/spc-index --keep 6)
+
+          if [[ -n "${{ inputs.date || '' }}" || -n "${{ inputs.hour || '' }}" ]]; then
+            if [[ -z "${{ inputs.date || '' }}" || -z "${{ inputs.hour || '' }}" ]]; then
+              echo "Manual date/hour must either both be set or both be blank." >&2
+              exit 2
+            fi
+            args=(--date "${{ inputs.date }}" --hour "${{ inputs.hour }}" --output-dir site/spc-index --keep 6)
+          fi
+
+          if [[ "${{ inputs.force || false }}" == "true" ]]; then
+            args+=(--force)
+          fi
+
+          python build_spc_index.py "${args[@]}"
+
+      - name: Commit newest six indexes to repository
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add site/spc-index
+          if git diff --cached --quiet; then
+            echo "No SPC index changes to commit."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update SPC mesoanalysis indexes"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Configure GitHub Pages
+        if: steps.commit.outputs.changed == 'true'
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: steps.commit.outputs.changed == 'true'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: './site'
+
+  deploy:
+    if: needs.build.outputs.changed == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
