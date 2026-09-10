@@ -1,10 +1,8 @@
 name: Update SPC mesoanalysis indexes
 
 on:
-#  schedule:
-    # Once per hour. The script probes newest->older and skips cleanly if the
-    # newest available FINAL is already published.
- #   - cron: '25 * * * *'
+  # Scheduling is external (cron-job.org). This endpoint is triggered through
+  # GitHub's workflow-dispatch REST API once per hour.
   workflow_dispatch:
     inputs:
       date:
@@ -45,6 +43,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: requirements-spc-index.txt
 
       - name: Install indexer dependencies
         run: python -m pip install -r requirements-spc-index.txt
