@@ -1,10 +1,10 @@
 name: Update SPC mesoanalysis indexes
 
 on:
-  schedule:
+#  schedule:
     # Once per hour. The script probes newest->older and skips cleanly if the
     # newest available FINAL is already published.
-    - cron: '25 * * * *'
+ #   - cron: '25 * * * *'
   workflow_dispatch:
     inputs:
       date:
