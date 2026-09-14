@@ -34,22 +34,21 @@ import requests
 
 NOMADS_ROOT = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/spc_post/para"
 DATASET_DIR = "sfcoa-hrrr"
-ANALYSIS = "final"
 INDEX_VERSION = 6
 DEFAULT_KEEP = 6
 DEFAULT_LOOKBACK = 8
-INDEX_RE = re.compile(r"^(\d{8})T(\d{2})Z-final\.json$")
+INDEX_RE = re.compile(r"^(\d{8})T(\d{2})Z-(firstguess|final)\.json$")
 
 
 def pad2(v: int | str) -> str:
     return str(v).zfill(2)
 
 
-def source_url(date: str, hour: int) -> str:
+def source_url(date: str, hour: int, analysis: str) -> str:
     hh = pad2(hour)
     return (
         f"{NOMADS_ROOT}/spc_post.{date}/{DATASET_DIR}/"
-        f"spc_post.t{hh}z.sfcoa_hrrr.{ANALYSIS}.nc"
+        f"spc_post.t{hh}z.sfcoa_hrrr.{analysis}.nc"
     )
 
 
@@ -57,8 +56,8 @@ def stamp(date: str, hour: int) -> str:
     return f"{date}T{pad2(hour)}Z"
 
 
-def index_filename(date: str, hour: int) -> str:
-    return f"{stamp(date, hour)}-{ANALYSIS}.json"
+def index_filename(date: str, hour: int, analysis: str) -> str:
+    return f"{stamp(date, hour)}-{analysis}.json"
 
 
 def date_hour(dt: datetime) -> tuple[str, int]:
@@ -235,13 +234,13 @@ def range_probe(url: str, timeout: float = 20.0) -> bool:
         return False
 
 
-def find_latest_available(lookback: int) -> tuple[str, int, str] | None:
+def find_latest_available(lookback: int, analysis: str) -> tuple[str, int, str] | None:
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     for back in range(max(0, lookback) + 1):
         dt = now - timedelta(hours=back)
         date, hour = date_hour(dt)
-        url = source_url(date, hour)
-        print(f"Probe {date} {hour:02d}Z ...", flush=True)
+        url = source_url(date, hour, analysis)
+        print(f"Probe {date} {hour:02d}Z {analysis} ...", flush=True)
         if range_probe(url):
             return date, hour, url
     return None
@@ -255,8 +254,8 @@ def open_hdf5_remote(url: str):
     return fh, h5py.File(fh, mode="r")
 
 
-def build_index(date: str, hour: int, local_file: str | None = None) -> dict[str, Any]:
-    url = source_url(date, hour)
+def build_index(date: str, hour: int, analysis: str, local_file: str | None = None) -> dict[str, Any]:
+    url = source_url(date, hour, analysis)
     fh = None
     if local_file:
         h5 = h5py.File(local_file, "r")
@@ -265,7 +264,7 @@ def build_index(date: str, hour: int, local_file: str | None = None) -> dict[str
         # Re-probe immediately before h5py so a 200/full-file response is not accepted
         # after an upstream behavior change.
         if not range_probe(url):
-            raise RuntimeError(f"NOMADS FINAL file is missing or Range is not honored: {url}")
+            raise RuntimeError(f"NOMADS {analysis.upper()} file is missing or Range is not honored: {url}")
         fh, h5 = open_hdf5_remote(url)
         source = url
 
@@ -301,8 +300,8 @@ def build_index(date: str, hour: int, local_file: str | None = None) -> dict[str
             "date": date,
             "hour": int(hour),
             "stamp": stamp(date, hour),
-            "analysis": ANALYSIS,
-            "filename": f"spc_post.t{pad2(hour)}z.sfcoa_hrrr.{ANALYSIS}.nc",
+            "analysis": analysis,
+            "filename": f"spc_post.t{pad2(hour)}z.sfcoa_hrrr.{analysis}.nc",
             "sourceUrl": source,
             "indexedAt": datetime.now(timezone.utc).isoformat(),
             "grid": {
@@ -334,10 +333,18 @@ def parse_index_path(path: Path) -> tuple[str, int] | None:
 
 def retained_indexes(output_dir: Path) -> list[Path]:
     paths = []
-    for p in output_dir.glob("????????T??Z-final.json"):
-        if parse_index_path(p):
+    for p in output_dir.glob("????????T??Z-*.json"):
+        m = INDEX_RE.match(p.name)
+        if m:
             paths.append(p)
-    return sorted(paths, key=lambda p: p.name)
+
+    def key(p: Path):
+        m = INDEX_RE.match(p.name)
+        assert m is not None
+        analysis = m.group(3)
+        return (m.group(1), int(m.group(2)), 1 if analysis == "final" else 0)
+
+    return sorted(paths, key=key)
 
 
 def current_latest_stamp(output_dir: Path) -> str | None:
@@ -355,7 +362,8 @@ def write_pages_index(index: dict[str, Any], output_dir: Path, keep: int) -> dic
     output_dir.mkdir(parents=True, exist_ok=True)
     date = str(index["date"])
     hour = int(index["hour"])
-    target = output_dir / index_filename(date, hour)
+    analysis = str(index.get("analysis") or "final")
+    target = output_dir / index_filename(date, hour, analysis)
     compact = json.dumps(index, separators=(",", ":"), allow_nan=False) + "\n"
     target.write_text(compact, encoding="utf-8")
 
@@ -406,7 +414,7 @@ def validate_date_hour(date: str, hour: int) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     source_group = ap.add_mutually_exclusive_group(required=False)
-    source_group.add_argument("--auto", action="store_true", help="Find newest available FINAL within --lookback hours")
+    source_group.add_argument("--auto", action="store_true", help="Find newest available SFCOA file within --lookback hours")
     source_group.add_argument("--date", help="Explicit YYYYMMDD (requires --hour)")
     ap.add_argument("--hour", type=int, help="Explicit UTC hour 0-23")
     ap.add_argument("--lookback", type=int, default=DEFAULT_LOOKBACK, help="Hours back to probe with --auto (default 8)")
@@ -417,6 +425,10 @@ def main() -> None:
     args = ap.parse_args()
 
     output_dir = Path(args.output_dir)
+
+    now_utc = datetime.now(timezone.utc)
+    analysis = "firstguess" if 30 <= now_utc.minute <= 55 else "final"
+    print(f"Selected analysis from UTC minute {now_utc.minute:02d}: {analysis}")
 
     if args.local_file:
         if not args.date or args.hour is None:
@@ -430,17 +442,17 @@ def main() -> None:
         validate_date_hour(date, hour)
     else:
         # Default to --auto for scheduled GitHub Action simplicity.
-        found = find_latest_available(args.lookback)
+        found = find_latest_available(args.lookback, analysis)
         if not found:
-            print(f"No range-readable SPC FINAL found in the last {args.lookback + 1} hours", file=sys.stderr)
+            print(f"No range-readable SPC {analysis.upper()} found in the last {args.lookback + 1} hours", file=sys.stderr)
             raise SystemExit(0)
         date, hour, _ = found
 
     wanted_stamp = stamp(date, hour)
     latest_stamp = current_latest_stamp(output_dir)
-    timestamped = output_dir / index_filename(date, hour)
-    if not args.force and latest_stamp == wanted_stamp and timestamped.exists():
-        print(f"NO_CHANGE: {wanted_stamp} is already the published latest index")
+    timestamped = output_dir / index_filename(date, hour, analysis)
+    if not args.force and timestamped.exists():
+        print(f"NO_CHANGE: {wanted_stamp} {analysis} is already indexed")
         # Still enforce retention if a human has left extra old files in the tree.
         kept = retained_indexes(output_dir)
         for old in kept[:-max(1, args.keep)]:
@@ -448,7 +460,7 @@ def main() -> None:
         raise SystemExit(0)
 
     print(f"Building SPC index for {date} {hour:02d}Z")
-    idx = build_index(date, hour, args.local_file)
+    idx = build_index(date, hour, analysis, args.local_file)
     write_pages_index(idx, output_dir, args.keep)
 
 
