@@ -32,7 +32,7 @@ import h5py
 import numpy as np
 import requests
 
-NOMADS_ROOT = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/spc_post/para"
+NOMADS_ROOT = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/spc_post/v3.0/"
 DATASET_DIR = "sfcoa-hrrr"
 INDEX_VERSION = 6
 DEFAULT_KEEP = 6
